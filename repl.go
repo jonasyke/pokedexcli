@@ -8,11 +8,15 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
+
+	"github.com/jonasyke/pokedexcli/internal/pokecache"
 )
 
 type config struct {
-	nextURL *string
-	prevURL *string
+	pokeapiClient pokecache.Cache
+	nextURL       *string
+	prevURL       *string
 }
 
 type RespShallowLocations struct {
@@ -26,9 +30,9 @@ type RespShallowLocations struct {
 }
 
 type cliCommand struct {
-	name	string
+	name        string
 	description string
-	callback	func(*config) error
+	callback    func(*config) error
 }
 
 func cleanInput(text string) []string {
@@ -39,12 +43,24 @@ func cleanInput(text string) []string {
 
 func commandHelp(conf *config) error {
 	fmt.Println("Welcome to the Pokedex!")
-	fmt.Println("Usage:" )
+	fmt.Println("Usage:")
 	fmt.Println()
-	for _, cmd := range getCommands() {
+	
+	keys := []string{
+		"help",
+		"map",
+		"mapb",
+		"exit",
+	}
+
+	commands := getCommands()
+
+	for _, name := range keys {
+		cmd := commands[name]
 		fmt.Printf("%s: %s\n", cmd.name, cmd.description)
 	}
 	return nil
+
 }
 
 func commandExit(conf *config) error {
@@ -53,101 +69,115 @@ func commandExit(conf *config) error {
 	return nil
 }
 
-func fetchLocations(url string) (RespShallowLocations, error) {
-    res, err := http.Get(url)
-    if err != nil {
-        return RespShallowLocations{}, err
-    }
-    defer res.Body.Close()
+func fetchLocations(url string, cache *pokecache.Cache) (RespShallowLocations, error) {
+	if val, ok := cache.Get(url); ok {
+		fmt.Println("(using cache)")
+		locationResp := RespShallowLocations{}
+		err := json.Unmarshal(val, &locationResp)
+		if err != nil {
+			return RespShallowLocations{}, err
+		}
+		return locationResp, nil
+	}
 
-    if res.StatusCode > 299 {
-        return RespShallowLocations{}, fmt.Errorf("bad status code: %v", res.StatusCode)
-    }
+	res, err := http.Get(url)
+	if err != nil {
+		return RespShallowLocations{}, err
+	}
+	defer res.Body.Close()
 
-    data, err := io.ReadAll(res.Body)
-    if err != nil {
-        return RespShallowLocations{}, err
-    }
+	if res.StatusCode > 299 {
+		return RespShallowLocations{}, fmt.Errorf("bad status code: %v", res.StatusCode)
+	}
 
-    locationResp := RespShallowLocations{}
-    err = json.Unmarshal(data, &locationResp)
-    if err != nil {
-        return RespShallowLocations{}, err
-    }
+	data, err := io.ReadAll(res.Body)
+	if err != nil {
+		return RespShallowLocations{}, err
+	}
 
-    return locationResp, nil
+	cache.Add(url, data)
+
+	locationResp := RespShallowLocations{}
+	err = json.Unmarshal(data, &locationResp)
+	if err != nil {
+		return RespShallowLocations{}, err
+	}
+
+	return locationResp, nil
 }
 
 func commandMap(conf *config) error {
-    url := "https://pokeapi.co/api/v2/location-area"
-    if conf.nextURL != nil {
-        url = *conf.nextURL
-    }
+	url := "https://pokeapi.co/api/v2/location-area"
+	if conf.nextURL != nil {
+		url = *conf.nextURL
+	}
 
-    locationResp, err := fetchLocations(url)
-    if err != nil {
-        return err
-    }
+	locationResp, err := fetchLocations(url, &conf.pokeapiClient)
+	if err != nil {
+		return err
+	}
 
-    conf.nextURL = locationResp.Next
-    conf.prevURL = locationResp.Previous
+	conf.nextURL = locationResp.Next
+	conf.prevURL = locationResp.Previous
 
-    for _, loc := range locationResp.Results {
-        fmt.Println(loc.Name)
-    }
-    return nil
+	for _, loc := range locationResp.Results {
+		fmt.Println(loc.Name)
+	}
+	return nil
 }
 
 func commandMapB(conf *config) error {
-    if conf.prevURL == nil {
-        fmt.Println("you're on the first page")
-        return nil
-    }
+	if conf.prevURL == nil {
+		fmt.Println("you're on the first page")
+		return nil
+	}
 
-    locationResp, err := fetchLocations(*conf.prevURL)
-    if err != nil {
-        return err
-    }
+	locationResp, err := fetchLocations(*conf.prevURL, &conf.pokeapiClient)
+	if err != nil {
+		return err
+	}
 
-    conf.nextURL = locationResp.Next
-    conf.prevURL = locationResp.Previous
+	conf.nextURL = locationResp.Next
+	conf.prevURL = locationResp.Previous
 
-    for _, loc := range locationResp.Results {
-        fmt.Println(loc.Name)
-    }
-    return nil
+	for _, loc := range locationResp.Results {
+		fmt.Println(loc.Name)
+	}
+	return nil
 }
 
 func getCommands() map[string]cliCommand {
 	return map[string]cliCommand{
 		"help": {
-			name: "help",
+			name:        "help",
 			description: "Displays a help message",
-			callback: commandHelp,
+			callback:    commandHelp,
 		},
 		"exit": {
-			name: "exit",
+			name:        "exit",
 			description: "Exit the Pokedex",
-			callback: commandExit,
+			callback:    commandExit,
 		},
 		"map": {
-			name: "map",
+			name:        "map",
 			description: "displays the name of 20 location areas in the Pokemon World",
-			callback:commandMap,
+			callback:    commandMap,
 		},
 		"mapb": {
-			name: "mapb",
+			name:        "mapb",
 			description: "Displays the previous 20 location areas",
-			callback: commandMapB,
+			callback:    commandMapB,
 		},
 	}
 }
 
 func startRepl() {
+	cache := pokecache.NewCache(5 * time.Minute)
 	scanner := bufio.NewScanner(os.Stdin)
 	cfg := &config{
-		nextURL: nil,
-		prevURL: nil,
+		pokeapiClient: cache,
+		nextURL:       nil,
+		prevURL:       nil,
 	}
 
 	commands := getCommands()
