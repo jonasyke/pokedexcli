@@ -15,6 +15,15 @@ type cacheEntry struct {
 	val       []byte
 }
 
+func NewCache(interval time.Duration) Cache {
+	c := Cache{
+		entries: make(map[string]cacheEntry),
+		mux:     &sync.Mutex{},
+	}
+	go c.reapLoop(interval)
+	return c
+}
+
 func (c *Cache) Add(key string, val []byte) {
 	c.mux.Lock()
 	defer c.mux.Unlock()
@@ -46,14 +55,4 @@ func (c *Cache) reap(now time.Time, last time.Duration) {
 			delete(c.entries, k)
 		}
 	}
-}
-
-func NewCache(interval time.Duration) Cache {
-	c := Cache{
-		entries: make(map[string]cacheEntry),
-		mux:     &sync.Mutex{},
-	}
-
-	go c.reapLoop(interval)
-	return c
 }
